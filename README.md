@@ -83,7 +83,12 @@ docker run --rm --name nature-remo -p 127.0.0.1:8080:8080 \
 - Argo CD: `nature-remo`（wave 12）、`nature-remo-access`（wave 13）
 
 詳しい初回公開手順は隣接リポジトリの [docs/nature-remo.md](../home-lab-k8s/docs/nature-remo.md) を参照。
-最初にイメージを Harbor へ登録し、`REMO_DEVICES` と NetworkPolicy の Remo IP を設定してから GitOps に反映します。
+`main` への push では、テスト成功後に GitHub-hosted runner が Tailscale OIDC 経由で
+`harbor.internal.qroksera.com/sandbox/nature-remo` へイメージを登録します。
+タグは `build-<run-id>-<attempt>-<commit-sha>` と、公開時点の main の先頭コミットに対する `latest` です。
+Actions secrets に `TS_OAUTH_CLIENT_ID`、`TS_AUDIENCE`、`HARBOR_USERNAME`、`HARBOR_PASSWORD` が必要です。
+PR と手動実行はテスト・ビルドのみを行います。
+初回はイメージの公開成功を確認し、`REMO_DEVICES` と NetworkPolicy の Remo IP を設定してから GitOps に反映します。
 Tailscale Operator、MagicDNS、tailnet の HTTPS、対象ノードへのアクセス権が必要です。
 Ingress の hostname は `nature-remo`、Service は ClusterIP です。Funnel は設定しません。
 
