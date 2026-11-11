@@ -23,6 +23,14 @@ jobs:
           node-version: '24'
       - run: make test test-race
       - run: docker build -t nature-remo:ci .
+      - name: Scan image with Trivy (report only)
+        # 報告のみ。Harbor の Trivy は無効化済み。DB 取得失敗などでも公開は止めない。
+        continue-on-error: true
+        run: |
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock:ro \
+            aquasec/trivy:0.76.1@sha256:790fd66d1697395d8693d1acaa1ea702406a20f109b6fc7bac8db623eca6c06c \
+            image --scanners vuln --severity HIGH,CRITICAL --ignore-unfixed --exit-code 0 --no-progress \
+            "nature-remo:ci"
       - name: Export Docker image tar
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         run: docker save nature-remo:ci | gzip > /tmp/nature-remo-image.tar.gz
