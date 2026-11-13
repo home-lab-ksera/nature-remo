@@ -1,3 +1,3 @@
 module github.com/home-lab-ksera/nature-remo
 
-go 1.23
+go 1.26
