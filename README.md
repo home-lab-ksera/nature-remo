@@ -9,7 +9,7 @@ Go の標準ライブラリのみで動作し、HTML/CSS/JavaScript を単一バ
 Web ページ・スクリプトもアプリ内に同梱し、外部 CDN に依存しません。
 
 ```text
-ブラウザー → Tailscale HTTPS Ingress → Service → Go アプリ → LAN 上の Remo:80
+ブラウザー → 共有 Gateway (HTTPS, 192.168.122.100) → Service → Go アプリ → LAN 上の Remo:80
                                                    └→ PVC /data/buttons.json
 ```
 
@@ -74,13 +74,13 @@ docker run --rm --name nature-remo -p 127.0.0.1:8080:8080 \
 非 root（UID/GID 1000）で動作します。bind mount を使う場合は `/data` を UID 1000 で書き込めるようにしてください。
 書き込み先は `/data` のみです。OS パッケージやフロントエンドの npm 依存はありません。
 
-## Kubernetes / Tailscale
+## Kubernetes
 
 既存の `home-lab-k8s` の GitOps 構成に定義を追加しています。
 
 - workload: `manifests/apps/nature-remo/`
-- Tailscale Ingress / NetworkPolicy: `manifests/access/nature-remo/`
-- Argo CD: `nature-remo`（wave 12）、`nature-remo-access`（wave 13）
+- HTTPRoute / AccessPolicy / NetworkPolicy: `manifests/apps/nature-remo/access.yaml`
+- Argo CD: `nature-remo`（公開経路も同じ Application）
 
 詳しい初回公開手順は隣接リポジトリの [docs/nature-remo.md](../home-lab-k8s/docs/nature-remo.md) を参照。
 `main` への push では、テスト成功後に GitHub-hosted runner が Tailscale OIDC 経由で
@@ -89,12 +89,12 @@ docker run --rm --name nature-remo -p 127.0.0.1:8080:8080 \
 Actions secrets に `TS_OAUTH_CLIENT_ID`、`TS_AUDIENCE`、`HARBOR_USERNAME`、`HARBOR_PASSWORD` が必要です。
 PR と手動実行はテスト・ビルドのみを行います。
 初回はイメージの公開成功を確認し、`REMO_DEVICES` と NetworkPolicy の Remo IP を設定してから GitOps に反映します。
-Tailscale Operator、MagicDNS、tailnet の HTTPS、対象ノードへのアクセス権が必要です。
-Ingress の hostname は `nature-remo`、Service は ClusterIP です。Funnel は設定しません。
+URL は `https://nature-remo.internal.qroksera.com`（共有 Gateway `192.168.122.100`）だけです。
+専用の Tailscale Ingress は廃止しました。tailnet の端末は subnet router と Split DNS 経由で同じ URL を開きます。Service は ClusterIP です。
 
-アプリの利用者認証・認可は Tailscale の ACL/grants に委ねます。許可された利用者は全ボタンの登録・削除・送信ができます。
+アプリに利用者認証はありません。Gateway の AccessPolicy が許可する送信元（家庭内 LAN・クラスタ・tailnet）の利用者は全ボタンの登録・削除・送信ができます。
 公開インターネットや信頼できないネットワークにこのサーバーを直接公開しないでください。
-NetworkPolicy は tailscale namespace からの ingress と、指定した Remo への egress に制限します。
+NetworkPolicy は共有 Gateway Pod からの ingress と、指定した Remo への egress に制限します。
 CSRF 対策として更新 API には専用ヘッダー・JSON を要求し、別 Origin からの操作を拒否します。
 
 ## 保存・バックアップ
@@ -111,7 +111,7 @@ PVC は Argo CD の prune/delete から保護していますが、定期バッ�
 ## 障害時に使える条件
 
 対象は Nature のクラウド障害です。Kubernetes、保存用 PVC、Remo、家庭内 LAN、および
-利用端末からアプリまでの Tailscale 接続は稼働している必要があります。
+利用端末から Gateway までの経路（家庭内 LAN または Tailscale）は稼働している必要があります。
 この構成だけでインターネット断・Tailscale 障害・家庭内 LAN 障害まで代替できるとは限りません。
 未登録の家電操作を Nature アプリの設定から障害中に復元することはできないため、必要な操作を事前に登録してください。
 
