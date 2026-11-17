@@ -28,7 +28,7 @@ Kubernetes の通常の Pod から `.local` の mDNS は解決できるとは限
 
 ## ローカル起動
 
-Go 1.23 以降（コンテナと CI は Go 1.26）を使用します。
+Go 1.26 を使用します（`go.mod` と Dockerfile で固定）。
 
 ```bash
 export REMO_DEVICES='[{"id":"living","name":"リビング","url":"http://192.168.1.20"}]'
@@ -76,21 +76,22 @@ docker run --rm --name nature-remo -p 127.0.0.1:8080:8080 \
 
 ## Kubernetes
 
-既存の `home-lab-k8s` の GitOps 構成に定義を追加しています。
+定義は [home-lab-k8s](https://github.com/home-lab-ksera/home-lab-k8s) にあります。
 
 - workload: `manifests/apps/nature-remo/`
 - HTTPRoute / AccessPolicy / NetworkPolicy: `manifests/apps/nature-remo/access.yaml`
 - Argo CD: `nature-remo`（公開経路も同じ Application）
+- 運用上の注意: [アプリ一覧](https://github.com/home-lab-ksera/home-lab-k8s/blob/main/docs/apps.md#nature-remo)、送信元の制限: [アクセス経路](https://github.com/home-lab-ksera/home-lab-k8s/blob/main/docs/access.md#url)
 
-詳しい初回公開手順は隣接リポジトリの [docs/nature-remo.md](../home-lab-k8s/docs/nature-remo.md) を参照。
 `main` への push では、テスト成功後に GitHub-hosted runner が Tailscale OIDC 経由で
 `harbor.internal.qroksera.com/sandbox/nature-remo` へイメージを登録します。
 タグは `build-<run-id>-<attempt>-<commit-sha>` と、公開時点の main の先頭コミットに対する `latest` です。
 Actions secrets に `TS_OAUTH_CLIENT_ID`、`TS_AUDIENCE`、`HARBOR_USERNAME`、`HARBOR_PASSWORD` が必要です。
 PR と手動実行はテスト・ビルドのみを行います。
-初回はイメージの公開成功を確認し、`REMO_DEVICES` と NetworkPolicy の Remo IP を設定してから GitOps に反映します。
+公開された `latest` の digest は Image Updater が home-lab-k8s に書き戻し、ArgoCD が配布します（[アプリ配布](https://github.com/home-lab-ksera/home-lab-k8s/blob/main/docs/app-delivery.md)）。
+Remo を替える・増やすときは、`manifests/apps/nature-remo/kustomization.yaml` の `REMO_DEVICES` と、`access.yaml` の NetworkPolicy の Remo IP の両方を直します。
 URL は `https://nature-remo.internal.qroksera.com`（共有 Gateway `192.168.122.100`）だけです。
-専用の Tailscale Ingress は廃止しました。tailnet の端末は subnet router と Split DNS 経由で同じ URL を開きます。Service は ClusterIP です。
+tailnet の端末は subnet router と Split DNS 経由で同じ URL を開きます。Service は ClusterIP です。
 
 アプリに利用者認証はありません。Gateway の AccessPolicy が許可する送信元（家庭内 LAN・クラスタ・tailnet）の利用者は全ボタンの登録・削除・送信ができます。
 公開インターネットや信頼できないネットワークにこのサーバーを直接公開しないでください。
@@ -103,7 +104,7 @@ CSRF 対策として更新 API には専用ヘッダー・JSON を要求し、�
 保存失敗時は操作を失敗として返し、メモリ上の状態も維持します。
 ファイル破損時は空データで上書きせず、起動を失敗させます。
 保存先は単一プロセス専用のため **replicas: 1 / Recreate** を維持してください。
-PVC は Argo CD の prune/delete から保護していますが、定期バックアップは別途必要です。
+PVC は Argo CD の prune/delete から保護しています。定期バックアップはありません。必要なら下の方法で手で取ります。
 
 バックアップは `GET /api/state` の `buttons` 配列を JSON ファイルに保存するか、更新を止めて `buttons.json` をコピーします。
 復旧時はアプリを停止し、`buttons.json` を戻して UID/GID 1000・読み書き権限を確認してから再起動します。
