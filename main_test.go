@@ -325,3 +325,56 @@ func TestStaticAssetsAndHealthDoNotContactRemo(t *testing.T) {
 		}
 	}
 }
+
+func TestButtonPrepareNew(t *testing.T) {
+	valid := func() Button {
+		return Button{DeviceID: "living", Appliance: " エアコン ", Name: " 冷房 ", Signal: testSignal}
+	}
+	b := valid()
+	if err := b.prepareNew(true); err != nil || b.Appliance != "エアコン" || b.Name != "冷房" {
+		t.Fatalf("valid button: err=%v appliance=%q name=%q", err, b.Appliance, b.Name)
+	}
+	cases := map[string]func(*Button) bool{
+		"preset id":      func(b *Button) bool { b.ID = "x"; return true },
+		"unknown device": func(b *Button) bool { return false },
+		"blank name":     func(b *Button) bool { b.Name = "   "; return true },
+		"long appliance": func(b *Button) bool { b.Appliance = strings.Repeat("あ", 61); return true },
+	}
+	for name, mutate := range cases {
+		b := valid()
+		if err := b.prepareNew(mutate(&b)); err != errInvalidButton {
+			t.Errorf("%s: err=%v", name, err)
+		}
+	}
+	b = valid()
+	b.Name = strings.Repeat("あ", 60)
+	if err := b.prepareNew(true); err != nil {
+		t.Errorf("60 characters must be accepted: %v", err)
+	}
+	b = valid()
+	b.Signal.Freq = 10
+	if err := b.prepareNew(true); err == nil || err == errInvalidButton {
+		t.Errorf("invalid signal must report the signal error: %v", err)
+	}
+}
+
+func TestSameOrigin(t *testing.T) {
+	for origin, want := range map[string]bool{
+		"":                          true,
+		"http://remo.local":         true,
+		"https://remo.local":        true,
+		"http://evil.example":       false,
+		"ftp://remo.local":          false,
+		"http://remo.local/path":    false,
+		"http://user@remo.local":    false,
+		"http://remo.local?query=1": false,
+	} {
+		r := httptest.NewRequest(http.MethodPost, "http://remo.local/api/buttons", nil)
+		if origin != "" {
+			r.Header.Set("Origin", origin)
+		}
+		if got := sameOrigin(r); got != want {
+			t.Errorf("Origin %q: got %v, want %v", origin, got, want)
+		}
+	}
+}
