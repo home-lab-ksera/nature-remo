@@ -72,6 +72,27 @@ type Button struct {
 	Signal    IRSignal `json:"signal"`
 }
 
+const (
+	maxButtons     = 500
+	maxLabelLength = 60
+)
+
+var errInvalidButton = errors.New("Remo、家電名、ボタン名（各60文字以内）を確認してください")
+
+// prepareNew は新規登録するボタンの前後の空白を除き、内容を検証する。
+// deviceExists は DeviceID が現在の設定にある Remo を指すかどうか。
+func (b *Button) prepareNew(deviceExists bool) error {
+	b.Name, b.Appliance = strings.TrimSpace(b.Name), strings.TrimSpace(b.Appliance)
+	if b.ID != "" || !deviceExists || !validLabel(b.Name) || !validLabel(b.Appliance) {
+		return errInvalidButton
+	}
+	return b.Signal.validate()
+}
+
+func validLabel(s string) bool {
+	return s != "" && len([]rune(s)) <= maxLabelLength
+}
+
 type Store struct {
 	mu      sync.Mutex
 	path    string
@@ -129,6 +150,18 @@ func (s *Store) persist(buttons []Button) error {
 		return err
 	}
 	return os.Rename(f.Name(), s.path)
+}
+
+// find は id のボタンの複製を返す。見つからなければ nil。
+func (s *Store) find(id string) *Button {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, b := range s.buttons {
+		if b.ID == id {
+			return &b
+		}
+	}
+	return nil
 }
 
 var idPattern = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,64}$`)
@@ -251,147 +284,18 @@ func (a *App) remo(ctx context.Context, device *Device, method string, s *IRSign
 func (a *App) handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { respond(w, 200, map[string]bool{"ok": true}) })
-	mux.HandleFunc("GET /api/state", func(w http.ResponseWriter, r *http.Request) {
-		a.store.mu.Lock()
-		defer a.store.mu.Unlock()
-		respond(w, 200, map[string]any{"devices": a.devices, "buttons": a.store.buttons})
-	})
-	mux.HandleFunc("POST /api/devices/{id}/capture", func(w http.ResponseWriter, r *http.Request) {
-		d := a.device(r.PathValue("id"))
-		if d == nil {
-			fail(w, 404, "Remo が設定されていません")
-			return
-		}
-		if !d.mu.TryLock() {
-			fail(w, 409, "この Remo は通信中です")
-			return
-		}
-		defer d.mu.Unlock()
-		s, err := a.remo(r.Context(), d, http.MethodGet, nil)
-		if errors.Is(err, errNoIRSignal) {
-			respond(w, 404, map[string]string{"code": "no_signal", "error": "受信信号を取得できませんでした。実物の赤外線リモコンを Remo に向けて押し、すぐにもう一度取得してください"})
-			return
-		}
-		if err != nil {
-			log.Printf("capture device=%s: %v", d.ID, err)
-			fail(w, 502, "信号を取得できません。Remo の接続とリモコンの送信を確認してください")
-			return
-		}
-		respond(w, 200, s)
-	})
-	mux.HandleFunc("POST /api/buttons", func(w http.ResponseWriter, r *http.Request) {
-		var b Button
-		if !decode(w, r, &b) {
-			return
-		}
-		b.Name, b.Appliance = strings.TrimSpace(b.Name), strings.TrimSpace(b.Appliance)
-		if b.ID != "" || a.device(b.DeviceID) == nil || b.Name == "" || len([]rune(b.Name)) > 60 || b.Appliance == "" || len([]rune(b.Appliance)) > 60 {
-			fail(w, 400, "Remo、家電名、ボタン名（各60文字以内）を確認してください")
-			return
-		}
-		if err := b.Signal.validate(); err != nil {
-			fail(w, 400, err.Error())
-			return
-		}
-		id := make([]byte, 16)
-		if _, err := rand.Read(id); err != nil {
-			fail(w, 500, "ID を生成できません")
-			return
-		}
-		b.ID = hex.EncodeToString(id)
-		a.store.mu.Lock()
-		defer a.store.mu.Unlock()
-		if len(a.store.buttons) >= 500 {
-			fail(w, 409, "登録上限は500ボタンです")
-			return
-		}
-		for _, existing := range a.store.buttons {
-			if existing.DeviceID == b.DeviceID && existing.Appliance == b.Appliance && existing.Name == b.Name {
-				fail(w, 409, "同じ家電に同名のボタンが登録されています")
-				return
-			}
-		}
-		next := append(append([]Button{}, a.store.buttons...), b)
-		if err := a.store.persist(next); err != nil {
-			log.Printf("save: %v", err)
-			fail(w, 500, "保存できません。ストレージを確認してください")
-			return
-		}
-		a.store.buttons = next
-		respond(w, 201, b)
-	})
-	mux.HandleFunc("DELETE /api/buttons/{id}", func(w http.ResponseWriter, r *http.Request) {
-		a.store.mu.Lock()
-		defer a.store.mu.Unlock()
-		next := []Button{}
-		found := false
-		for _, b := range a.store.buttons {
-			if b.ID == r.PathValue("id") {
-				found = true
-			} else {
-				next = append(next, b)
-			}
-		}
-		if !found {
-			fail(w, 404, "ボタンが見つかりません")
-			return
-		}
-		if err := a.store.persist(next); err != nil {
-			log.Printf("delete: %v", err)
-			fail(w, 500, "削除を保存できません")
-			return
-		}
-		a.store.buttons = next
-		respond(w, 200, map[string]bool{"ok": true})
-	})
-	mux.HandleFunc("POST /api/buttons/{id}/send", func(w http.ResponseWriter, r *http.Request) {
-		var button *Button
-		a.store.mu.Lock()
-		for _, b := range a.store.buttons {
-			if b.ID == r.PathValue("id") {
-				copy := b
-				button = &copy
-				break
-			}
-		}
-		a.store.mu.Unlock()
-		if button == nil {
-			fail(w, 404, "ボタンが見つかりません")
-			return
-		}
-		d := a.device(button.DeviceID)
-		if d == nil {
-			fail(w, 409, "保存先の Remo が現在の設定にありません")
-			return
-		}
-		if !d.mu.TryLock() {
-			fail(w, 409, "この Remo は通信中です")
-			return
-		}
-		defer d.mu.Unlock()
-		if time.Since(d.lastAttempt) < time.Second {
-			fail(w, 429, "連続送信を防ぐため、少し待ってください")
-			return
-		}
-		d.lastAttempt = time.Now()
-		// タイムアウトでも実機に届いている可能性があるため、自動再送しない。
-		if _, err := a.remo(r.Context(), d, http.MethodPost, &button.Signal); err != nil {
-			log.Printf("send device=%s button=%s: %v", d.ID, button.ID, err)
-			fail(w, 502, "送信結果を確認できません。家電の状態を確認してから再操作してください")
-			return
-		}
-		respond(w, 200, map[string]string{"sentAt": time.Now().UTC().Format(time.RFC3339)})
-	})
+	mux.HandleFunc("GET /api/state", a.handleState)
+	mux.HandleFunc("POST /api/devices/{id}/capture", a.handleCapture)
+	mux.HandleFunc("POST /api/buttons", a.handleCreateButton)
+	mux.HandleFunc("DELETE /api/buttons/{id}", a.handleDeleteButton)
+	mux.HandleFunc("POST /api/buttons/{id}/send", a.handleSendButton)
 	mux.HandleFunc("GET /api/", func(w http.ResponseWriter, r *http.Request) { fail(w, 404, "API が見つかりません") })
-	web, _ := fs.Sub(assets, "web")
-	files := http.FileServer(http.FS(web))
-	mux.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/" && r.URL.Path != "/app.js" && r.URL.Path != "/style.css" {
-			http.NotFound(w, r)
-			return
-		}
-		files.ServeHTTP(w, r)
-	})
+	mux.Handle("GET /", staticFiles())
+	return protect(mux)
+}
+
+// protect はセキュリティヘッダーを付け、状態を変える要求を同一オリジンの画面からに限る。
+func protect(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
@@ -399,13 +303,9 @@ func (a *App) handler() http.Handler {
 		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {
 			// 任意の Web サイトからの家電操作を防ぐ。CORS は許可しない。
-			origin := r.Header.Get("Origin")
-			if origin != "" {
-				u, err := url.Parse(origin)
-				if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host != r.Host || u.User != nil || u.Path != "" || u.RawQuery != "" || u.Fragment != "" {
-					fail(w, 403, "別のサイトからの操作は許可されていません")
-					return
-				}
+			if !sameOrigin(r) {
+				fail(w, 403, "別のサイトからの操作は許可されていません")
+				return
 			}
 			media, _, _ := mime.ParseMediaType(r.Header.Get("Content-Type"))
 			if r.Header.Get("X-Requested-With") != "nature-remo" || media != "application/json" || r.Header.Get("Sec-Fetch-Site") == "cross-site" {
@@ -413,8 +313,153 @@ func (a *App) handler() http.Handler {
 				return
 			}
 		}
-		mux.ServeHTTP(w, r)
+		next.ServeHTTP(w, r)
 	})
+}
+
+// sameOrigin は Origin ヘッダーが無いか、このサーバー自身を指すときに true を返す。
+func sameOrigin(r *http.Request) bool {
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		return true
+	}
+	u, err := url.Parse(origin)
+	return err == nil && (u.Scheme == "http" || u.Scheme == "https") && u.Host == r.Host && u.User == nil && u.Path == "" && u.RawQuery == "" && u.Fragment == ""
+}
+
+// staticFiles は埋め込んだ画面のファイルだけを配信する。
+func staticFiles() http.Handler {
+	web, _ := fs.Sub(assets, "web")
+	files := http.FileServer(http.FS(web))
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/" && r.URL.Path != "/app.js" && r.URL.Path != "/style.css" {
+			http.NotFound(w, r)
+			return
+		}
+		files.ServeHTTP(w, r)
+	})
+}
+
+func (a *App) handleState(w http.ResponseWriter, r *http.Request) {
+	a.store.mu.Lock()
+	defer a.store.mu.Unlock()
+	respond(w, 200, map[string]any{"devices": a.devices, "buttons": a.store.buttons})
+}
+
+func (a *App) handleCapture(w http.ResponseWriter, r *http.Request) {
+	d := a.device(r.PathValue("id"))
+	if d == nil {
+		fail(w, 404, "Remo が設定されていません")
+		return
+	}
+	if !d.mu.TryLock() {
+		fail(w, 409, "この Remo は通信中です")
+		return
+	}
+	defer d.mu.Unlock()
+	s, err := a.remo(r.Context(), d, http.MethodGet, nil)
+	if errors.Is(err, errNoIRSignal) {
+		respond(w, 404, map[string]string{"code": "no_signal", "error": "受信信号を取得できませんでした。実物の赤外線リモコンを Remo に向けて押し、すぐにもう一度取得してください"})
+		return
+	}
+	if err != nil {
+		log.Printf("capture device=%s: %v", d.ID, err)
+		fail(w, 502, "信号を取得できません。Remo の接続とリモコンの送信を確認してください")
+		return
+	}
+	respond(w, 200, s)
+}
+
+func (a *App) handleCreateButton(w http.ResponseWriter, r *http.Request) {
+	var b Button
+	if !decode(w, r, &b) {
+		return
+	}
+	if err := b.prepareNew(a.device(b.DeviceID) != nil); err != nil {
+		fail(w, 400, err.Error())
+		return
+	}
+	id := make([]byte, 16)
+	if _, err := rand.Read(id); err != nil {
+		fail(w, 500, "ID を生成できません")
+		return
+	}
+	b.ID = hex.EncodeToString(id)
+	a.store.mu.Lock()
+	defer a.store.mu.Unlock()
+	if len(a.store.buttons) >= maxButtons {
+		fail(w, 409, "登録上限は500ボタンです")
+		return
+	}
+	for _, existing := range a.store.buttons {
+		if existing.DeviceID == b.DeviceID && existing.Appliance == b.Appliance && existing.Name == b.Name {
+			fail(w, 409, "同じ家電に同名のボタンが登録されています")
+			return
+		}
+	}
+	next := append(append([]Button{}, a.store.buttons...), b)
+	if err := a.store.persist(next); err != nil {
+		log.Printf("save: %v", err)
+		fail(w, 500, "保存できません。ストレージを確認してください")
+		return
+	}
+	a.store.buttons = next
+	respond(w, 201, b)
+}
+
+func (a *App) handleDeleteButton(w http.ResponseWriter, r *http.Request) {
+	a.store.mu.Lock()
+	defer a.store.mu.Unlock()
+	next := []Button{}
+	found := false
+	for _, b := range a.store.buttons {
+		if b.ID == r.PathValue("id") {
+			found = true
+		} else {
+			next = append(next, b)
+		}
+	}
+	if !found {
+		fail(w, 404, "ボタンが見つかりません")
+		return
+	}
+	if err := a.store.persist(next); err != nil {
+		log.Printf("delete: %v", err)
+		fail(w, 500, "削除を保存できません")
+		return
+	}
+	a.store.buttons = next
+	respond(w, 200, map[string]bool{"ok": true})
+}
+
+func (a *App) handleSendButton(w http.ResponseWriter, r *http.Request) {
+	button := a.store.find(r.PathValue("id"))
+	if button == nil {
+		fail(w, 404, "ボタンが見つかりません")
+		return
+	}
+	d := a.device(button.DeviceID)
+	if d == nil {
+		fail(w, 409, "保存先の Remo が現在の設定にありません")
+		return
+	}
+	if !d.mu.TryLock() {
+		fail(w, 409, "この Remo は通信中です")
+		return
+	}
+	defer d.mu.Unlock()
+	if time.Since(d.lastAttempt) < time.Second {
+		fail(w, 429, "連続送信を防ぐため、少し待ってください")
+		return
+	}
+	d.lastAttempt = time.Now()
+	// タイムアウトでも実機に届いている可能性があるため、自動再送しない。
+	if _, err := a.remo(r.Context(), d, http.MethodPost, &button.Signal); err != nil {
+		log.Printf("send device=%s button=%s: %v", d.ID, button.ID, err)
+		fail(w, 502, "送信結果を確認できません。家電の状態を確認してから再操作してください")
+		return
+	}
+	respond(w, 200, map[string]string{"sentAt": time.Now().UTC().Format(time.RFC3339)})
 }
 
 func main() {
