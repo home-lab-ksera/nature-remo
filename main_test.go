@@ -312,16 +312,27 @@ func TestDeviceConfig(t *testing.T) {
 	}
 }
 
-func TestStaticAssetsAndHealthDoNotContactRemo(t *testing.T) {
-	_, _, server := setup(t, func(w http.ResponseWriter, r *http.Request) { t.Error("health or static request contacted Remo") })
-	for _, path := range []string{"/", "/app.js", "/style.css", "/healthz", "/api/state"} {
+func TestHealthAndStateDoNotContactRemo(t *testing.T) {
+	_, _, server := setup(t, func(w http.ResponseWriter, r *http.Request) { t.Error("health or state request contacted Remo") })
+	// 画面は dashboard にある。このサーバーは API だけを返す。
+	for _, path := range []string{"/", "/app.js"} {
+		res, err := server.Client().Get(server.URL + path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		res.Body.Close()
+		if res.StatusCode != 404 {
+			t.Fatalf("%s should not be served: %d", path, res.StatusCode)
+		}
+	}
+	for _, path := range []string{"/healthz", "/api/state"} {
 		res, err := server.Client().Get(server.URL + path)
 		if err != nil {
 			t.Fatal(err)
 		}
 		res.Body.Close()
 		if res.StatusCode != 200 || res.Header.Get("Content-Security-Policy") == "" {
-			t.Fatalf("static response: %s %d", path, res.StatusCode)
+			t.Fatalf("response: %s %d", path, res.StatusCode)
 		}
 	}
 }

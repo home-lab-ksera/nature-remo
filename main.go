@@ -4,13 +4,11 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
-	"embed"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"log"
 	"mime"
 	"net/http"
@@ -24,9 +22,6 @@ import (
 	"syscall"
 	"time"
 )
-
-//go:embed web/*
-var assets embed.FS
 
 const maxBody = 256 * 1024
 
@@ -290,7 +285,6 @@ func (a *App) handler() http.Handler {
 	mux.HandleFunc("DELETE /api/buttons/{id}", a.handleDeleteButton)
 	mux.HandleFunc("POST /api/buttons/{id}/send", a.handleSendButton)
 	mux.HandleFunc("GET /api/", func(w http.ResponseWriter, r *http.Request) { fail(w, 404, "API が見つかりません") })
-	mux.Handle("GET /", staticFiles())
 	return protect(mux)
 }
 
@@ -325,19 +319,6 @@ func sameOrigin(r *http.Request) bool {
 	}
 	u, err := url.Parse(origin)
 	return err == nil && (u.Scheme == "http" || u.Scheme == "https") && u.Host == r.Host && u.User == nil && u.Path == "" && u.RawQuery == "" && u.Fragment == ""
-}
-
-// staticFiles は埋め込んだ画面のファイルだけを配信する。
-func staticFiles() http.Handler {
-	web, _ := fs.Sub(assets, "web")
-	files := http.FileServer(http.FS(web))
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/" && r.URL.Path != "/app.js" && r.URL.Path != "/style.css" {
-			http.NotFound(w, r)
-			return
-		}
-		files.ServeHTTP(w, r)
-	})
 }
 
 func (a *App) handleState(w http.ResponseWriter, r *http.Request) {

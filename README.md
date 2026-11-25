@@ -1,15 +1,15 @@
 # Nature Remo — おうちのリモコン
 
-Nature Remo Local API で赤外線を取得・保存・送信する日本語 Web アプリ。
-Go の標準ライブラリのみで動作し、HTML/CSS/JavaScript を単一バイナリに含めます。
-スマートフォンと PC に対応。複数 Remo、家電ごとのボタン、信号 JSON の登録、削除に対応します。
+Nature Remo Local API で赤外線を取得・保存・送信する API サーバー。Go の標準ライブラリのみで動作します。
+複数 Remo、家電ごとのボタン、信号 JSON の登録、削除に対応します。
+画面は [dashboard](https://github.com/home-lab-ksera/dashboard) の「リモコン」（`/remo`）にあります（2026-11-25 にこのリポジトリから移した）。
 
 目的は **Nature のクラウド障害時の代替操作** です。操作に Cloud API や Nature の認証は使用しません。
 必要な赤外線信号を事前に保存し、障害時はその保存済みデータだけで Remo に送信します。
-Web ページ・スクリプトもアプリ内に同梱し、外部 CDN に依存しません。
+画面（dashboard）も外部 CDN に依存しません。
 
 ```text
-ブラウザー → 共有 Gateway (HTTPS, 192.168.122.100) → Service → Go アプリ → LAN 上の Remo:80
+dashboard の画面 → 共有 Gateway (HTTPS, 192.168.122.100, /remo/api/ → /api/) → Service → Go アプリ → LAN 上の Remo:80
                                                    └→ PVC /data/buttons.json
 ```
 
@@ -35,8 +35,8 @@ export REMO_DEVICES='[{"id":"living","name":"リビング","url":"http://192.168
 LISTEN_ADDR=127.0.0.1:8080 go run .
 ```
 
-`http://127.0.0.1:8080` を開きます。上記 IP は例です。
-未設定の場合は接続設定待ちの画面を表示します。実機は起動時・ヘルスチェック時に操作しません。
+`curl http://127.0.0.1:8080/api/state` で状態を確認できます。上記 IP は例です。
+画面から試すときは、dashboard の開発サーバーの `/remo/api` をこのサーバーの `/api` に転送します。実機は起動時・ヘルスチェック時に操作しません。
 
 | 環境変数 | 既定値 | 用途 |
 | --- | --- | --- |
@@ -47,7 +47,20 @@ LISTEN_ADDR=127.0.0.1:8080 go run .
 `id` は保存したボタンの接続先に使うため、IP の変更時にも維持します。
 `url` は管理者の環境設定のみで指定し、Web リクエストから任意の URL へ接続する API は設けません。
 
-## ボタン登録
+## API
+
+| メソッドとパス | 内容 |
+| --- | --- |
+| `GET /api/state` | Remo の一覧と保存済みのボタン |
+| `POST /api/devices/{id}/capture` | Remo が最後に受信した信号。まだなければ 404（`code: no_signal`） |
+| `POST /api/buttons` | ボタンを保存（`deviceId`・`appliance`・`name`・`signal`） |
+| `DELETE /api/buttons/{id}` | ボタンを削除 |
+| `POST /api/buttons/{id}/send` | 保存した信号を送信 |
+| `GET /healthz` | ヘルスチェック（Remo には接続しない） |
+
+GET 以外は、同じ Origin・`X-Requested-With: nature-remo`・`Content-Type: application/json` の要求だけを受け付けます。
+
+## ボタン登録（dashboard の画面）
 
 1. 「ボタンを登録」で Remo・家電名・ボタン名を指定します。
 2. 「受信を待ち受ける」を押し、「リモコンを押してください」と表示されたら実際のリモコンを Remo に向けて押します。
@@ -72,7 +85,7 @@ docker run --rm --name nature-remo -p 127.0.0.1:8080:8080 \
 ```
 
 非 root（UID/GID 1000）で動作します。bind mount を使う場合は `/data` を UID 1000 で書き込めるようにしてください。
-書き込み先は `/data` のみです。OS パッケージやフロントエンドの npm 依存はありません。
+書き込み先は `/data` のみです。OS パッケージの依存はありません。
 
 ## Kubernetes
 
@@ -90,8 +103,8 @@ Actions secrets に `TS_OAUTH_CLIENT_ID`、`TS_AUDIENCE`、`HARBOR_USERNAME`、`
 PR と手動実行はテスト・ビルドのみを行います。
 公開された `latest` の digest は Image Updater が home-lab-k8s に書き戻し、ArgoCD が配布します（[アプリ配布](https://github.com/home-lab-ksera/home-lab-k8s/blob/main/docs/app-delivery.md)）。
 Remo を替える・増やすときは、`manifests/apps/nature-remo/kustomization.yaml` の `REMO_DEVICES` と、`access.yaml` の NetworkPolicy の Remo IP の両方を直します。
-URL は `https://nature-remo.internal.qroksera.com`（共有 Gateway `192.168.122.100`）だけです。
-tailnet の端末は subnet router と Split DNS 経由で同じ URL を開きます。Service は ClusterIP です。
+経路は dashboard の `https://dashboard.internal.qroksera.com/remo/api/`（共有 Gateway `192.168.122.100`）だけで、Gateway が `/api/` に書き換えます。
+tailnet の端末は subnet router と Split DNS 経由で同じ URL を使います。Service は ClusterIP です。
 
 アプリに利用者認証はありません。Gateway の AccessPolicy が許可する送信元（家庭内 LAN・クラスタ・tailnet）の利用者は全ボタンの登録・削除・送信ができます。
 公開インターネットや信頼できないネットワークにこのサーバーを直接公開しないでください。
@@ -119,7 +132,7 @@ PVC は Argo CD の prune/delete から保護しています。定期バック�
 ## 検証
 
 ```bash
-make test       # Go テスト / vet / JavaScript 構文検査
+make test       # Go テスト / vet
 make test-race  # C コンパイラがある環境で並行処理を検証（CI でも実行）
 make image      # コンテナビルド
 ```
